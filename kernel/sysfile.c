@@ -274,7 +274,11 @@ create(char *path, short type, short major, short minor)
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       panic("create dots");
   }
-
+  /*else if (type == T_SYMLINK){
+    if(writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target))
+      panic("panic: create symlink");
+  }*/
+  
   if(dirlink(dp, name, ip->inum) < 0)
     panic("create: dirlink");
 
@@ -291,6 +295,9 @@ sys_open(void)
   struct file *f;
   struct inode *ip;
   int n;
+
+  int cnt = 0, length;
+  char next[MAXPATH+1];
 
   if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
@@ -309,6 +316,7 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -316,11 +324,36 @@ sys_open(void)
     }
   }
 
+
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
+
+
+  if(!(omode & O_NOFOLLOW)){
+    for( ;cnt < 10 && ip->type == T_SYMLINK; cnt++){
+      readi(ip,0,(uint64)&length,0,4);
+      readi(ip,0,(uint64)next,4,length);
+      next[length] = 0;
+      iunlockput(ip);
+      ip = namei(next);
+      if(ip == 0){
+        // destination is symlink or target not exist
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+    }
+  }
+  if(cnt >= 10){
+    // might have a cycle here
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
@@ -483,4 +516,37 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+int len(char *array){
+  int res = 0;
+  for( ;res < MAXPATH && array[res] != 0; res++);
+  return res;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0){
+    return -1;
+  }
+  
+  begin_op();
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  
+  int length = len(target);
+  writei(ip,0,(uint64)&length,0,4);
+  writei(ip,0,(uint64)target,4,length+1);
+  iunlockput(ip);
+
+  end_op();
+  return 0;
+
 }
